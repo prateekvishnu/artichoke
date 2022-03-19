@@ -10,10 +10,13 @@ use crate::codepoints::InvalidCodepointError;
 use crate::iter::{Bytes, IntoIter, Iter, IterMut};
 use crate::ord::OrdError;
 
+mod center;
 mod eq;
 mod impls;
 #[cfg(feature = "std")]
 mod io;
+
+pub use center::Center;
 
 #[allow(clippy::module_name_repetitions)]
 #[derive(Default, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
