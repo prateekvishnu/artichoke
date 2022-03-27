@@ -71,6 +71,8 @@ mod libs {
             "src/print.c",
             "src/proc.c",
             "src/range.c",
+            "src/readflt.c",
+            "src/readint.c",
             "src/state.c",
             "src/string.c",
             "src/symbol.c",
