@@ -16,7 +16,7 @@ mod impls;
 #[cfg(feature = "std")]
 mod io;
 
-pub use center::Center;
+// pub use center::Center;
 
 #[allow(clippy::module_name_repetitions)]
 #[derive(Default, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
