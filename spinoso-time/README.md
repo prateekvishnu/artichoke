@@ -23,8 +23,10 @@ class, it is globally available:
 Time.now
 ```
 
-This implementation of `Time` supports the system clock via the [`chrono`]
-crate.
+This implementation of `Time` is dependent on the selected feature. The
+**chrono** feature uses the [`chrono`] crate, and the **tzrs** feature uses the
+[`tzdb`] crate for getting the local timezone information, and combines with the
+[`tz-rs`] crate to generate the time.
 
 _Spinoso_ refers to _Carciofo spinoso di Sardegna_, the thorny artichoke of
 Sardinia. The data structures defined in the `spinoso` family of crates form the
@@ -36,13 +38,15 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-spinoso-time = "0.2.0"
+spinoso-time = { version = "0.4.0", features = ["chrono"] }
 ```
 
 ## Examples
 
+Assuming feature `chrono` is selected:
+
 ```rust
-use spinoso_time::Time;
+use spinoso_time::chrono::Time;
 // Get a local time set to the current time.
 let now = Time::now();
 // Convert the local time to UTC.
@@ -52,9 +56,34 @@ assert!(utc.is_utc());
 let timestamp = utc.to_int();
 ```
 
+## Crate features
+
+This crate supports two backends which are independent of each other. The
+availability of different backends is controlled by Cargo features, all of which
+are enabled by default:
+
+- **chrono**: Enable a `Time` backend which is implemented with the [`chrono`]
+  crate.
+- **tzrs**: Enable a `Time` backend which is implemented by the [`tz-rs`] and
+  [`tzdb`] crates.
+
+### Additional features
+
+- **tzrs-local**: Enable the detection of the system timezone with the **tzrs**
+  backend. This feature is enabled by default. Enabling this feature also
+  activates the **tzrs** feature.
+
+  If the **tzrs-local** feature is disabled, the local timezone is defaulted to
+  GMT (not UTC).
+
+This crate requires [`std`], the Rust Standard Library.
+
 ## License
 
 `spinoso-time` is licensed with the [MIT License](LICENSE) (c) Ryan Lopopolo.
 
 [`time`]: https://ruby-doc.org/core-2.6.3/Time.html
 [`chrono`]: https://crates.io/crates/chrono
+[`tz-rs`]: https://crates.io/crates/tz-rs
+[`tzdb`]: https://crates.io/crates/tzdb
+[`std`]: https://doc.rust-lang.org/stable/std/

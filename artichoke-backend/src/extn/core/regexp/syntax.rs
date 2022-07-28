@@ -1,4 +1,4 @@
-// This module is forked from `regex-syntax` crate @ 26f7318e.
+// This module is forked from `regex-syntax` crate @ `26f7318e`.
 //
 // https://github.com/rust-lang/regex/blob/26f7318e2895eae56e95a260e81e2d48b90e7c25/regex-syntax/src/lib.rs
 //
@@ -47,11 +47,11 @@ pub fn escape_into(text: &str, buf: &mut String) {
 
 /// Returns true if the given character has significance in a regex.
 #[must_use]
+#[allow(clippy::match_like_matches_macro)]
+#[allow(clippy::match_same_arms)]
 pub fn is_meta_character(c: char) -> bool {
     match c {
-        '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '#' | '&' | '-' | '~' => {
-            true
-        }
+        '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '#' | '-' => true,
         // This match arm differs from `regex-syntax` by including '/'.
         // Ruby uses '/' to mark `Regexp` literals in source code.
         '/' => true,
@@ -89,10 +89,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_meta() {
+    fn escape_meta_charactors() {
         assert_eq!(
-            escape(r"\.+*?()|[]{}^$#&-~"),
-            r"\\\.\+\*\?\(\)\|\[\]\{\}\^\$\#\&\-\~".to_string()
+            escape(r"\.+*?()|[]{}^$#-"),
+            r"\\\.\+\*\?\(\)\|\[\]\{\}\^\$\#\-".to_string()
         );
+    }
+
+    #[test]
+    fn keep_normal_charactors() {
+        assert_eq!(escape(r"abc&~"), r"abc&~".to_string());
     }
 }

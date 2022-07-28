@@ -4,9 +4,11 @@ use core::hash::{BuildHasher, Hash, Hasher};
 use core::str;
 
 use artichoke_core::hash::Hash as _;
+use artichoke_core::value::Value as _;
 use bstr::ByteSlice;
 
 use crate::convert::implicitly_convert_to_int;
+use crate::convert::implicitly_convert_to_nilable_string;
 use crate::convert::implicitly_convert_to_string;
 use crate::extn::core::array::Array;
 #[cfg(feature = "core-regexp")]
@@ -34,7 +36,7 @@ pub fn add(interp: &mut Artichoke, mut value: Value, mut other: Value) -> Result
     let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     // Safety:
     //
-    // The borrowed byte slice is immediately memcpy'd into the `s` byte
+    // The borrowed byte slice is immediately `memcpy`'d into the `s` byte
     // buffer. There are no intervening interpreter accesses.
     let to_append = unsafe { implicitly_convert_to_string(interp, &mut other)? };
 
@@ -231,30 +233,38 @@ pub fn aref(
         }
         return matchdata::trampoline::element_reference(interp, match_data, interp.convert(0), None);
     }
-    if let Some(protect::Range { start: index, len }) = first.is_range(interp, s.char_len() as i64)? {
-        let index = if let Ok(index) = usize::try_from(index) {
-            Some(index)
-        } else {
-            index
-                .checked_neg()
-                .and_then(|index| usize::try_from(index).ok())
-                .and_then(|index| s.len().checked_sub(index))
-        };
-        let index = match index {
-            None => return Ok(Value::nil()),
-            Some(index) if index > s.len() => return Ok(Value::nil()),
-            Some(index) => index,
-        };
-        if let Ok(length) = usize::try_from(len) {
-            let end = index
-                .checked_add(length)
-                .ok_or_else(|| RangeError::with_message("bignum too big to convert into `long'"))?;
-            if let Some(slice) = s.get_char_slice(index..end) {
-                let s = super::String::with_bytes_and_encoding(slice.to_vec(), s.encoding());
-                return super::String::alloc_value(s, interp);
+    match first.is_range(interp, s.char_len() as i64)? {
+        None => {}
+        // ```
+        // [3.1.2] > ""[-1..-1]
+        // => nil
+        // ``
+        Some(protect::Range::Out) => return Ok(Value::nil()),
+        Some(protect::Range::Valid { start: index, len }) => {
+            let index = if let Ok(index) = usize::try_from(index) {
+                Some(index)
+            } else {
+                index
+                    .checked_neg()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| s.len().checked_sub(index))
+            };
+            let index = match index {
+                None => return Ok(Value::nil()),
+                Some(index) if index > s.len() => return Ok(Value::nil()),
+                Some(index) => index,
+            };
+            if let Ok(length) = usize::try_from(len) {
+                let end = index
+                    .checked_add(length)
+                    .ok_or_else(|| RangeError::with_message("bignum too big to convert into `long'"))?;
+                if let Some(slice) = s.get_char_slice(index..end) {
+                    let s = super::String::with_bytes_and_encoding(slice.to_vec(), s.encoding());
+                    return super::String::alloc_value(s, interp);
+                }
             }
+            return Ok(Value::nil());
         }
-        return Ok(Value::nil());
     }
     // The overload of `String#[]` that takes a `String` **only** takes `String`s.
     // No implicit conversion is performed.
@@ -361,6 +371,15 @@ pub fn aref(
 }
 
 pub fn aset(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let _s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     Err(NotImplementedError::new().into())
 }
@@ -399,6 +418,74 @@ pub fn byteslice(
     length: Option<Value>,
 ) -> Result<Value, Error> {
     let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+    let maybe_range = if length.is_none() {
+        index.is_range(interp, s.bytesize() as i64)?
+    } else {
+        None
+    };
+    match maybe_range {
+        None => {}
+        Some(protect::Range::Out) => return Ok(Value::nil()),
+        Some(protect::Range::Valid { start: index, len }) => {
+            let index = if let Ok(index) = usize::try_from(index) {
+                Some(index)
+            } else {
+                index
+                    .checked_neg()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| s.len().checked_sub(index))
+            };
+            let index = match index {
+                None => return Ok(Value::nil()),
+                Some(index) if index > s.len() => return Ok(Value::nil()),
+                Some(index) => index,
+            };
+            if let Ok(length) = usize::try_from(len) {
+                let end = index
+                    .checked_add(length)
+                    .ok_or_else(|| RangeError::with_message("bignum too big to convert into `long'"))?;
+                if let Some(slice) = s.get(index..end).or_else(|| s.get(index..)) {
+                    // Encoding from the source string is preserved.
+                    //
+                    // ```
+                    // [3.1.2] > s = "abc"
+                    // => "abc"
+                    // [3.1.2] > s.encoding
+                    // => #<Encoding:UTF-8>
+                    // [3.1.2] > s.byteslice(1..3).encoding
+                    // => #<Encoding:UTF-8>
+                    // [3.1.2] > t = s.force_encoding(Encoding::ASCII)
+                    // => "abc"
+                    // [3.1.2] > t.byteslice(1..3).encoding
+                    // => #<Encoding:US-ASCII>
+                    // ```
+                    let s = super::String::with_bytes_and_encoding(slice.to_vec(), s.encoding());
+                    // ```
+                    // [3.1.2] > class S < String; end
+                    // => nil
+                    // [3.1.2] > S.new("abc").byteslice(1..3).class
+                    // => String
+                    // ```
+                    //
+                    // The returned `String` is never frozen:
+                    //
+                    // ```
+                    // [3.1.2] > s = "abc"
+                    // => "abc"
+                    // [3.1.2] > s.frozen?
+                    // => false
+                    // [3.1.2] > s.byteslice(1..3).frozen?
+                    // => false
+                    // [3.1.2] > t = "abc".freeze
+                    // => "abc"
+                    // [3.1.2] > t.byteslice(1..3).frozen?
+                    // => false
+                    // ```
+                    return super::String::alloc_value(s, interp);
+                }
+            }
+        }
+    }
     // ```
     // [3.0.2] > class A; def to_int; 1; end; end
     // => :to_int
@@ -529,7 +616,7 @@ pub fn byteslice(
         let end = index
             .checked_add(length)
             .ok_or_else(|| RangeError::with_message("bignum too big to convert into `long'"))?;
-        if let Some(slice) = s.get(index..end) {
+        if let Some(slice) = s.get(index..end).or_else(|| s.get(index..)) {
             // Encoding from the source string is preserved.
             //
             // ```
@@ -580,6 +667,15 @@ pub fn capitalize(interp: &mut Artichoke, mut value: Value) -> Result<Value, Err
 }
 
 pub fn capitalize_bang(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     // Safety:
     //
@@ -670,8 +766,11 @@ pub fn chomp(interp: &mut Artichoke, mut value: Value, separator: Option<Value>)
     let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     let mut dup = s.clone();
     if let Some(mut separator) = separator {
-        let sep = unsafe { implicitly_convert_to_string(interp, &mut separator)? };
-        let _ = dup.chomp(Some(sep));
+        if let Some(sep) = unsafe { implicitly_convert_to_nilable_string(interp, &mut separator)? } {
+            let _ = dup.chomp(Some(sep));
+        } else {
+            return interp.try_convert_mut("");
+        }
     } else {
         let _ = dup.chomp(None::<&[u8]>);
     }
@@ -679,12 +778,24 @@ pub fn chomp(interp: &mut Artichoke, mut value: Value, separator: Option<Value>)
 }
 
 pub fn chomp_bang(interp: &mut Artichoke, mut value: Value, separator: Option<Value>) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     unsafe {
         let string_mut = s.as_inner_mut();
         let modified = if let Some(mut separator) = separator {
-            let sep = implicitly_convert_to_string(interp, &mut separator)?;
-            string_mut.chomp(Some(sep))
+            if let Some(sep) = implicitly_convert_to_nilable_string(interp, &mut separator)? {
+                string_mut.chomp(Some(sep))
+            } else {
+                return Ok(Value::nil());
+            }
         } else {
             string_mut.chomp(None::<&[u8]>)
         };
@@ -693,7 +804,7 @@ pub fn chomp_bang(interp: &mut Artichoke, mut value: Value, separator: Option<Va
             return super::String::box_into_value(s, value, interp);
         }
     }
-    Ok(value)
+    Ok(Value::nil())
 }
 
 pub fn chop(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
@@ -704,6 +815,15 @@ pub fn chop(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
 }
 
 pub fn chop_bang(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     if s.is_empty() {
         return Ok(Value::nil());
@@ -726,6 +846,15 @@ pub fn chr(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
 }
 
 pub fn clear(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     // Safety:
     //
@@ -983,6 +1112,15 @@ pub fn reverse(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error>
 }
 
 pub fn reverse_bang(interp: &mut Artichoke, mut value: Value) -> Result<Value, Error> {
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
     let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     // Safety:
     //
@@ -1146,8 +1284,19 @@ pub fn scan(interp: &mut Artichoke, value: Value, mut pattern: Value, block: Opt
 }
 
 pub fn setbyte(interp: &mut Artichoke, mut value: Value, index: Value, byte: Value) -> Result<Value, Error> {
-    let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     let index = implicitly_convert_to_int(interp, index)?;
+    let i64_byte = implicitly_convert_to_int(interp, byte)?;
+
+    if value.is_frozen(interp) {
+        let s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
+        let message = "can't modify frozen String: "
+            .chars()
+            .chain(s.inspect())
+            .collect::<super::String>();
+        return Err(FrozenError::from(message.into_vec()).into());
+    }
+
+    let mut s = unsafe { super::String::unbox_from_value(&mut value, interp)? };
     let index = if let Ok(index) = usize::try_from(index) {
         index
     } else {
@@ -1165,7 +1314,6 @@ pub fn setbyte(interp: &mut Artichoke, mut value: Value, index: Value, byte: Val
             return Err(IndexError::from(message).into());
         }
     };
-    let i64_byte = implicitly_convert_to_int(interp, byte)?;
     // Wrapping when negative is intentional
     //
     // ```

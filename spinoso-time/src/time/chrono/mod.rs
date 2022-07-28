@@ -3,11 +3,12 @@ use core::hash::{Hash, Hasher};
 
 use chrono::prelude::*;
 
-use crate::{ComponentOutOfRangeError, NANOS_IN_SECOND};
+use crate::NANOS_IN_SECOND;
 
 mod build;
 mod convert;
 mod date;
+mod error;
 mod math;
 mod offset;
 mod ops;
@@ -16,6 +17,7 @@ mod time;
 mod timezone;
 mod weekday;
 
+pub use error::ComponentOutOfRangeError;
 pub use offset::Offset;
 
 /// Implementation of Ruby [`Time`], a timezone-aware datetime, based on
@@ -38,7 +40,7 @@ pub use offset::Offset;
 /// # Examples
 ///
 /// ```
-/// # use spinoso_time::Time;
+/// # use spinoso_time::chrono::Time;
 /// // Create a Time to the current system clock with local offset
 /// let time = Time::now();
 /// assert!(!time.is_utc());
@@ -46,11 +48,11 @@ pub use offset::Offset;
 /// ```
 ///
 /// ```
-/// # use spinoso_time::Time;
+/// # use spinoso_time::chrono::Time;
 /// let time = Time::now();
 /// let one_hour_ago: Time = time - (60 * 60);
 /// assert_eq!(time.to_int() - 3600, one_hour_ago.to_int());
-/// assert_eq!(time.nanosecond(), one_hour_ago.nanosecond());
+/// assert_eq!(time.nanoseconds(), one_hour_ago.nanoseconds());
 /// ```
 ///
 /// # Implementation notes
@@ -111,7 +113,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let now_f = now.to_float();
     /// let now_i = now.to_int();
@@ -144,7 +146,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let now_f = now.to_float();
     /// let now_i = now.to_int();
@@ -162,12 +164,12 @@ impl Time {
     /// min, hour, day, month, year, wday, yday, isdst, zone].
     ///
     /// The ordering of the properties is important for the Ruby [`Time#to_a`]
-    /// API, and is accessible with the [`ToA::to_tuple`] method.
+    /// API.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let to_a = now.to_a();
     /// assert_eq!(to_a.sec, now.second());
@@ -213,24 +215,6 @@ pub struct ToA {
     pub zone: Offset,
 }
 
-impl ToA {
-    /// `ToA` represents ten-element array of values for time:
-    ///
-    /// [sec, min, hour, day, month, year, wday, yday, isdst, zone]
-    pub const ELEMENTS: usize = 10;
-
-    /// A ten-element array of values for time:
-    ///
-    /// [sec, min, hour, day, month, year, wday, yday, isdst, zone]
-    #[inline]
-    #[must_use]
-    pub fn to_tuple(self) -> (u32, u32, u32, u32, u32, i32, u32, u32, bool, Offset) {
-        (
-            self.sec, self.min, self.hour, self.day, self.month, self.year, self.wday, self.yday, self.isdst,
-            self.zone,
-        )
-    }
-}
 impl From<Time> for ToA {
     #[inline]
     fn from(time: Time) -> Self {
@@ -300,7 +284,7 @@ mod leap_second {
         assert!(datetime.nanosecond() > NANOS_IN_SECOND);
         let time = Time::from(datetime);
         assert_eq!(time.second(), 60);
-        assert_eq!(time.nanosecond(), 500_000_000);
+        assert_eq!(time.nanoseconds(), 500_000_000);
         let ToA {
             sec,
             min,
@@ -344,8 +328,8 @@ mod tests {
         assert_eq!(time.hour(), 1);
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 21);
-        assert_eq!(time.microsecond(), 0);
-        assert_eq!(time.nanosecond(), 0);
+        assert_eq!(time.microseconds(), 0);
+        assert_eq!(time.nanoseconds(), 0);
         assert_eq!(time.weekday(), 0);
         assert_eq!(time.year_day(), 97);
         assert!(!time.is_dst());
@@ -361,8 +345,8 @@ mod tests {
         assert_eq!(time.hour(), 18);
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 21);
-        assert_eq!(time.microsecond(), 0);
-        assert_eq!(time.nanosecond(), 0);
+        assert_eq!(time.microseconds(), 0);
+        assert_eq!(time.nanoseconds(), 0);
         assert_eq!(time.weekday(), 6);
         assert_eq!(time.year_day(), 96);
         // TODO: Implement DST and timezone detection. This requires a new release of
@@ -384,8 +368,8 @@ mod tests {
         assert_eq!(time.hour(), 18);
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 21);
-        assert_eq!(time.microsecond(), 0);
-        assert_eq!(time.nanosecond(), 0);
+        assert_eq!(time.microseconds(), 0);
+        assert_eq!(time.nanoseconds(), 0);
         assert_eq!(time.weekday(), 6);
         assert_eq!(time.year_day(), 96);
         // TODO: Implement DST and timezone detection. This requires a new release of

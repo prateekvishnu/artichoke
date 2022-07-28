@@ -2,7 +2,7 @@ use chrono::prelude::*;
 use chrono_tz::Tz;
 
 use crate::time::chrono::{Offset, Time};
-use crate::NANOS_IN_SECOND;
+use crate::{MICROS_IN_NANO, NANOS_IN_SECOND};
 
 impl Time {
     /// Returns the hour of the day `0..=23` for _time_.
@@ -10,7 +10,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let hour_of_day = now.hour();
     /// ```
@@ -50,7 +50,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let minute_of_hour = now.minute();
     /// ```
@@ -93,7 +93,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
     /// let second_of_minute = now.second();
     /// if second_of_minute >= 60 {
@@ -148,9 +148,9 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
-    /// let usec_since_last_second = now.second();
+    /// let usec_since_last_second = now.microseconds();
     /// if usec_since_last_second >= 1_000_000 {
     ///     // `now` is during a leap second
     /// }
@@ -159,8 +159,8 @@ impl Time {
     /// [leap seconds]: https://en.wikipedia.org/wiki/Leap_second
     #[inline]
     #[must_use]
-    pub const fn microsecond(self) -> u32 {
-        self.sub_second_nanos / 1_000
+    pub const fn microseconds(self) -> u32 {
+        self.sub_second_nanos / MICROS_IN_NANO
     }
 
     /// Returns the number of nanoseconds for _time_.
@@ -171,21 +171,21 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let now = Time::now();
-    /// let nsec_since_last_second = now.nanosecond();
+    /// let nsec_since_last_second = now.nanoseconds();
     /// ```
     ///
     /// # Implementation notes
     ///
     /// The IEEE 754 double is not accurate enough to represent the exact number
-    /// of nanoseconds since the Unix Epoch. [`nanosecond`](Self::nanosecond) is
-    /// more accurate than [`to_float`](Self::to_float).
+    /// of nanoseconds since the Unix Epoch. [`nanoseconds`](Self::nanoseconds)
+    /// is more accurate than [`to_float`](Self::to_float).
     ///
     /// [leap seconds]: https://en.wikipedia.org/wiki/Leap_second
     #[inline]
     #[must_use]
-    pub fn nanosecond(self) -> u32 {
+    pub fn nanoseconds(self) -> u32 {
         let Self { sub_second_nanos, .. } = self;
         // `chrono` stores leap seconds in the `sub_second_nanos` field.
         // Normalize so nanos is `0..1_000_000_000`.
@@ -203,7 +203,7 @@ impl Time {
     /// # Examples
     ///
     /// ```
-    /// # use spinoso_time::Time;
+    /// # use spinoso_time::chrono::Time;
     /// let time = Time::now();
     /// let (sub_second_units, units_per_second) = time.subsec();
     /// ```

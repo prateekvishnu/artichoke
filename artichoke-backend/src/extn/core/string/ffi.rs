@@ -15,6 +15,7 @@ use spinoso_exception::ArgumentError;
 use spinoso_exception::NoMemoryError;
 use spinoso_string::{RawParts, String};
 
+use super::trampoline;
 use crate::convert::BoxUnboxVmValue;
 use crate::error;
 use crate::sys;
@@ -26,7 +27,20 @@ use crate::value::Value;
 #[no_mangle]
 unsafe extern "C" fn mrb_str_new_capa(mrb: *mut sys::mrb_state, capa: usize) -> sys::mrb_value {
     unwrap_interpreter!(mrb, to => guard);
-    let result = String::with_capacity(capa);
+
+    let alloc_capacity = if let Some(capacity) = capa.checked_add(1) {
+        capacity
+    } else {
+        let err = ArgumentError::with_message("string capacity too large");
+        error::raise(guard, err);
+    };
+    // SAFETY: mruby assumes strings are allocated with `capacity = capa + 1`
+    // and that last byte is NUL.
+    let mut result = String::with_capacity(alloc_capacity);
+    let ptr = result.as_mut_ptr();
+    let last = ptr.add(capa);
+    *last = 0;
+
     let result = String::alloc_value(result, &mut guard);
     match result {
         Ok(value) => value.inner(),
@@ -39,19 +53,25 @@ unsafe extern "C" fn mrb_str_new_capa(mrb: *mut sys::mrb_state, capa: usize) -> 
 // ```
 #[no_mangle]
 unsafe extern "C" fn mrb_str_new(mrb: *mut sys::mrb_state, p: *const c_char, len: usize) -> sys::mrb_value {
-    unwrap_interpreter!(mrb, to => guard);
-    let s = if p.is_null() {
-        String::utf8(vec![0; len])
+    // SAFETY: delegate to `mrb_str_new_capa` to properly handle allocation and
+    // trailing NUL bytes.
+    let s = mrb_str_new_capa(mrb, len);
+
+    let rstring = s.value.p.cast::<sys::RString>();
+    let rstring_ptr = (*rstring).as_.heap.ptr;
+    let dest_slice = slice::from_raw_parts_mut(rstring_ptr, len);
+
+    if p.is_null() {
+        for byte in dest_slice {
+            *byte = 0;
+        }
     } else {
-        let bytes = slice::from_raw_parts(p.cast::<u8>(), len);
-        let bytes = bytes.to_vec();
-        String::utf8(bytes)
-    };
-    let result = String::alloc_value(s, &mut guard);
-    match result {
-        Ok(value) => value.inner(),
-        Err(exception) => error::raise(guard, exception),
+        let bytes = slice::from_raw_parts(p, len);
+        dest_slice.copy_from_slice(bytes);
     }
+    // Pack the new length from the `memcpy` into the `RString*`.
+    (*rstring).as_.heap.len = len as sys::mrb_int;
+    s
 }
 
 // ```c
@@ -59,15 +79,9 @@ unsafe extern "C" fn mrb_str_new(mrb: *mut sys::mrb_state, p: *const c_char, len
 // ```
 #[no_mangle]
 unsafe extern "C" fn mrb_str_new_cstr(mrb: *mut sys::mrb_state, p: *const c_char) -> sys::mrb_value {
-    unwrap_interpreter!(mrb, to => guard);
     let cstr = CStr::from_ptr(p);
-    let bytes = cstr.to_bytes().to_vec();
-    let result = String::utf8(bytes);
-    let result = String::alloc_value(result, &mut guard);
-    match result {
-        Ok(value) => value.inner(),
-        Err(exception) => error::raise(guard, exception),
-    }
+    let len = cstr.to_bytes().len();
+    mrb_str_new(mrb, p, len)
 }
 
 // ```c
@@ -121,6 +135,30 @@ unsafe extern "C" fn mrb_str_index(
         return offset as sys::mrb_int;
     }
     haystack.find(needle).map_or(-1, |pos| pos as sys::mrb_int)
+}
+
+// ```c
+// mrb_value mrb_str_aref(mrb_state *mrb, mrb_value str, mrb_value indx, mrb_value alen)
+// ```
+#[no_mangle]
+unsafe extern "C" fn mrb_str_aref(
+    mrb: *mut sys::mrb_state,
+    s: sys::mrb_value,
+    indx: sys::mrb_value,
+    alen: sys::mrb_value,
+) -> sys::mrb_value {
+    unwrap_interpreter!(mrb, to => guard);
+    let value = Value::from(s);
+    let indx = Value::from(indx);
+    let alen = Value::from(alen);
+
+    let alen = if alen.is_unreachable() { None } else { Some(alen) };
+
+    let result = trampoline::aref(&mut guard, value, indx, alen);
+    match result {
+        Ok(value) => value.into(),
+        Err(_) => Value::nil().into(),
+    }
 }
 
 // ```c
@@ -229,10 +267,15 @@ unsafe extern "C" fn mrb_str_plus(mrb: *mut sys::mrb_state, a: sys::mrb_value, b
         return Value::nil().into();
     };
 
-    let mut s = String::with_capacity_and_encoding(a.len() + b.len(), a.encoding());
+    let mut s = String::with_capacity_and_encoding(a.len() + b.len() + 1, a.encoding());
 
     s.extend_from_slice(a.as_slice());
     s.extend_from_slice(b.as_slice());
+
+    // SAFETY: mruby assumes strings are allocated with `capacity = capa + 1`
+    // and that last byte is NUL.
+    s.push_byte(0);
+    s.set_len(a.len() + b.len());
 
     let s = String::alloc_value(s, &mut guard).unwrap_or_default();
     s.into()
@@ -270,22 +313,22 @@ unsafe extern "C" fn mrb_str_equal(
     str1: sys::mrb_value,
     str2: sys::mrb_value,
 ) -> sys::mrb_bool {
-    unwrap_interpreter!(mrb, to => guard, or_else = sys::mrb_bool::from(false));
+    unwrap_interpreter!(mrb, to => guard, or_else = false);
     let mut a = Value::from(str1);
     let mut b = Value::from(str2);
 
     let a = if let Ok(a) = String::unbox_from_value(&mut a, &mut guard) {
         a
     } else {
-        return sys::mrb_bool::from(false);
+        return false;
     };
     let b = if let Ok(b) = String::unbox_from_value(&mut b, &mut guard) {
         b
     } else {
-        return sys::mrb_bool::from(false);
+        return false;
     };
 
-    sys::mrb_bool::from(*a == *b)
+    *a == *b
 }
 
 // ```c
@@ -314,19 +357,25 @@ unsafe extern "C" fn mrb_str_dup(mrb: *mut sys::mrb_state, s: sys::mrb_value) ->
     let basic = sys::mrb_sys_basic_ptr(s).cast::<sys::RString>();
     let class = (*basic).c;
 
-    if let Ok(string) = String::unbox_from_value(&mut string, &mut guard) {
-        let dup = string.clone();
-        if let Ok(value) = String::alloc_value(dup, &mut guard) {
-            let value = value.inner();
+    let (ptr, len) = if let Ok(mut string) = String::unbox_from_value(&mut string, &mut guard) {
+        // SAFETY: string is not modified.
+        let string_mut = string.as_inner_mut();
 
-            // dup'd strings keep the class of the source `String`.
-            let dup_basic = sys::mrb_sys_basic_ptr(value).cast::<sys::RString>();
-            (*dup_basic).c = class;
+        (string_mut.as_mut_ptr(), string_mut.len())
+    } else {
+        return Value::nil().into();
+    };
 
-            return value;
-        }
-    }
-    Value::nil().into()
+    drop(guard);
+
+    // SAFETY: delegate to `mrb_str_new` to maintain invariants around capacity
+    // and trailing NUL bytes.
+    let dup = mrb_str_new(mrb, ptr.cast::<c_char>(), len);
+    // dup'd strings keep the class of the source `String`.
+    let dup_basic = sys::mrb_sys_basic_ptr(dup).cast::<sys::RString>();
+    (*dup_basic).c = class;
+
+    dup
 }
 
 // ```c
@@ -459,20 +508,20 @@ unsafe extern "C" fn mrb_string_cstr(mrb: *mut sys::mrb_state, s: sys::mrb_value
 }
 
 // ```c
-// MRB_API mrb_value mrb_str_to_inum(mrb_state *mrb, mrb_value str, mrb_int base, mrb_bool badcheck)
+// MRB_API mrb_value mrb_str_to_integer(mrb_state *mrb, mrb_value str, mrb_int base, mrb_bool badcheck);
+// /* obsolete: use mrb_str_to_integer() */
+// #define mrb_str_to_inum(mrb, str, base, badcheck) mrb_str_to_integer(mrb, str, base, badcheck)
 // ```
 //
 // This function converts a numeric string to numeric `mrb_value` with the given base.
 #[no_mangle]
-unsafe extern "C" fn mrb_str_to_inum(
+unsafe extern "C" fn mrb_str_to_integer(
     mrb: *mut sys::mrb_state,
     s: sys::mrb_value,
     base: sys::mrb_int,
     badcheck: sys::mrb_bool,
 ) -> sys::mrb_value {
     unwrap_interpreter!(mrb, to => guard);
-    let badcheck = badcheck != 0;
-
     let mut s = Value::from(s);
     let s = if let Ok(s) = String::unbox_from_value(&mut s, &mut guard) {
         s
@@ -533,8 +582,6 @@ unsafe extern "C" fn mrb_str_to_inum(
 #[no_mangle]
 unsafe extern "C" fn mrb_str_to_dbl(mrb: *mut sys::mrb_state, s: sys::mrb_value, badcheck: sys::mrb_bool) -> c_double {
     unwrap_interpreter!(mrb, to => guard, or_else = 0.0);
-    let badcheck = badcheck != 0;
-
     let mut s = Value::from(s);
     let s = if let Ok(s) = String::unbox_from_value(&mut s, &mut guard) {
         s
@@ -582,6 +629,14 @@ unsafe extern "C" fn mrb_str_cat(
         // The string is repacked before any intervening mruby heap allocations.
         let string_mut = string.as_inner_mut();
         string_mut.extend_from_slice(slice);
+
+        // SAFETY: mruby assumes strings are allocated with `capacity = capa + 1`
+        // and that last byte is NUL.
+        let len = string_mut.len();
+        string_mut.reserve_exact(1);
+        string_mut.push_byte(0);
+        string_mut.set_len(len);
+
         let inner = string.take();
         let value = String::box_into_value(inner, s, &mut guard).expect("String reboxing should not fail");
 
